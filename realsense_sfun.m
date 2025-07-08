@@ -1,0 +1,140 @@
+function realsense_sfun(block)
+% RS_CAPTURE_SFUN  Live Intel RealSense source for Simulink (simulation only)
+%
+%   Out1 : depth-RGB image, uint8 column-vector (imgW*imgH*3 × 1)
+%   Out2 : colour-RGB image, same size (zeros if colour disabled)
+%   Out3 : accel [3×1] single (zeros if IMU disabled)
+%   Out4 : gyro  [3×1] single (zeros if IMU disabled)
+%
+%   One block per model.  No code generation (wrapper is a MEX file).
+
+% ─── USER SETTINGS ────────────────────────────────────────────────────
+imgW        = 1280;          % pixels
+imgH        = 720;          % pixels
+fps         = 30;           % frames per second
+enableColor = true;
+enableIMU   = true;
+% ──────────────────────────────────────────────────────────────────────
+
+vecLen = imgW*imgH*3;       % elements in one RGB frame
+
+% Shared objects for all callbacks (captured by nested functions)
+pipe      = [];             % realsense.pipeline
+colorizer = [];             % realsense.colorizer
+
+% Tell Simulink about ports & sample time
+setup(block);
+
+%---------------------------------------------------------------------%
+    function setup(block)
+        block.NumInputPorts  = 0;
+        block.NumOutputPorts = 4;
+
+        % Images as uint8 column vectors
+        setPort(block,1,vecLen,3);   % 3 = uint8
+        setPort(block,2,vecLen,3);
+        % IMU as single vectors
+        setPort(block,3,3,1);        % 1 = single
+        setPort(block,4,3,1);
+
+        block.NumDialogPrms      = 0;
+        block.SampleTimes        = [1/fps 0];
+        block.SimStateCompliance = 'DefaultSimState';
+
+        block.RegBlockMethod('Start',     @Start);
+        block.RegBlockMethod('Outputs',   @Outputs);
+        block.RegBlockMethod('Terminate', @Terminate);
+    end
+
+% Helper: specify one output port
+    function setPort(bl,idx,dim,dtid)
+        bl.OutputPort(idx).Dimensions   = dim;
+        bl.OutputPort(idx).DatatypeID   = dtid;   % 3-uint8, 1-single
+        bl.OutputPort(idx).Complexity   = 'Real';
+        bl.OutputPort(idx).SamplingMode = 'Sample';
+    end
+
+%---------------------------------------------------------------------%
+    function Start(~)
+        % Configure RealSense pipeline once, when simulation starts
+        if ~isempty(pipe)
+            error('Only one rs_capture_sfun block is allowed in a model.');
+        end
+
+        cfg = realsense.config();
+        cfg.enable_stream(realsense.stream.depth, imgW, imgH, ...
+                          realsense.format.z16, fps);
+        if enableColor
+            cfg.enable_stream(realsense.stream.color, imgW, imgH, ...
+                              realsense.format.rgb8, fps);
+        end
+        if enableIMU
+            cfg.enable_stream(realsense.stream.accel);
+            cfg.enable_stream(realsense.stream.gyro);
+        end
+
+        pipe      = realsense.pipeline();
+        colorizer = realsense.colorizer();
+        pipe.start(cfg);
+    end
+
+%---------------------------------------------------------------------%
+    function Outputs(block)
+        if isempty(pipe)
+            error('RealSense pipeline not initialised (Start failed).');
+        end
+
+        fs = pipe.wait_for_frames();   % blocking read
+
+        % Depth frame → colourised RGB vector
+        % dfrm   = fs.get_depth_frame();
+        % dcol   = colorizer.colorize(dfrm);
+        % block.OutputPort(1).Data = frameToVec(dcol);
+
+        % Colour frame
+        if enableColor
+            cfrm = fs.get_color_frame();
+            block.OutputPort(2).Data = frameToVec(cfrm);
+        else
+            block.OutputPort(2).Data = zeros(vecLen,1,'uint8');
+        end
+
+        % IMU data
+        if enableIMU
+            afrm = fs.first(realsense.stream.accel).as('motion_frame');
+            gfrm = fs.first(realsense.stream.gyro ).as('motion_frame');
+            block.OutputPort(3).Data = single(afrm.get_motion_data());
+            block.OutputPort(4).Data = single(gfrm.get_motion_data());
+        else
+            block.OutputPort(3).Data = single([0;0;0]);
+            block.OutputPort(4).Data = single([0;0;0]);
+        end
+
+        delete(fs);                    % free native resources
+    end
+
+%---------------------------------------------------------------------%
+    function Terminate(~)
+        if ~isempty(pipe)
+            pipe.stop();
+            delete(pipe);
+            delete(colorizer);
+            pipe      = [];
+            colorizer = [];
+        end
+    end
+
+%---------------------------------------------------------------------%
+    function v = frameToVec(frame)
+        % Convert RealSense frame to a column-vector in MATLAB order
+        w   = frame.get_width();
+        h   = frame.get_height();
+        buf = frame.get_data();                          % 1 × (3*w*h) uint8
+    
+        % 1) reshape to 3 × W × H (row-major → column-major adjustment)
+        img = permute(reshape(buf',[3, w, h]), [3 2 1]); % H × W × 3
+    
+        % 2) linearise in MATLAB (column-major) order
+        v = reshape(img, [], 1);                         % (H*W*3) × 1
+    end
+end
