@@ -111,15 +111,16 @@ classdef capture_example < matlab.apps.AppBase
 
         function tmProcess(app,~,~)
             RsFrameSet = app.RsPipeLine.wait_for_frames();
-            if app.SupportDepth ~= 0
-               df = RsFrameSet.get_depth_frame();
-               dc = app.RsColorizer.colorize(df);
-               dd = dc.get_data();
-               app.hD.CData = permute(reshape(dd',[3,dc.get_width(),dc.get_height()]),[3 2 1]);
-            end
+            % if app.SupportDepth ~= 0
+            %    df = RsFrameSet.get_depth_frame();
+            %    dc = app.RsColorizer.colorize(df);
+            %    dd = dc.get_data();
+            %    app.hD.CData = permute(reshape(dd',[3,dc.get_width(),dc.get_height()]),[3 2 1]);
+            % end
             if app.SupportColor ~= 0
                cf = RsFrameSet.get_color_frame();
                dd = cf.get_data();
+               disp(dd);
                app.hC.CData = permute(reshape(dd',[3,cf.get_width(),cf.get_height()]),[3 2 1]);
             end
             if app.SupportAccel ~= 0
