@@ -120,7 +120,6 @@ classdef capture_example < matlab.apps.AppBase
             if app.SupportColor ~= 0
                cf = RsFrameSet.get_color_frame();
                dd = cf.get_data();
-               disp(dd);
                app.hC.CData = permute(reshape(dd',[3,cf.get_width(),cf.get_height()]),[3 2 1]);
             end
             if app.SupportAccel ~= 0
