@@ -9,15 +9,16 @@ function realsense_sfun(block)
 %   • Simulation only (Normal / Accelerator); no Coder support
 
 % ── USER SETTINGS ─────────────────────────────────────────────────────
-imgW      = 1280;   % pixels
-imgH      = 720;    % pixels
+imgW      = 320;   % pixels
+imgH      = 240;    % pixels
 fps       = 30;     % frames per second
-enableIMU = true;
+prev = 0;
 % ---------------------------------------------------------------------
 vecLen = imgW * imgH * 3;   % elements in one RGB frame
 
 % Shared objects (captured by nested functions)
 pipe = [];                  %#ok<NASGU>  % realsense.pipeline
+% lastFs = [];
 
 % Tell Simulink about ports & sample time
 setup(block);
@@ -34,7 +35,7 @@ setup(block);
         % Port-3 : gyro  XYZ  (single)
         setPort(block,3,3,1);
 
-        block.SampleTimes        = [1/fps 0];
+        block.SampleTimes        = [0.01 0];
         block.SimStateCompliance = 'DefaultSimState';
         block.RegBlockMethod('Start',     @Start);
         block.RegBlockMethod('Outputs',   @Outputs);
@@ -56,34 +57,67 @@ setup(block);
         end
 
         cfg = realsense.config();
-        cfg.enable_stream(realsense.stream.color, imgW, imgH, ...
-                          realsense.format.rgb8, fps);
+        cfg.enable_stream(realsense.stream.color, imgW, imgH, realsense.format.rgb8, fps);
         cfg.enable_stream(realsense.stream.accel);
         cfg.enable_stream(realsense.stream.gyro);
 
         pipe = realsense.pipeline();
         pipe.start(cfg);
+
+        % % — prime the cache so lastFs isn’t empty —
+        % tempFs = pipe.wait_for_frames();
+        % lastFs = tempFs;
     end
 
 %======================================================================%
     function Outputs(block)
-        if isempty(pipe)
-            error('RealSense pipeline not initialised (Start failed).');
+        persistent lastColorVec lastAccel lastGyro
+        if isempty(lastColorVec)
+            % Prime the caches on first call
+            lastColorVec = zeros(vecLen,1,'uint8');
+            lastAccel    = single([0;0;0]);
+            lastGyro     = single([0;0;0]);
+        end
+        % ── TIMING INSTRUMENTATION ───────────────────────────
+        persistent simZero realZero polled run
+        if isempty(simZero)
+            simZero  = block.CurrentTime;  % should be 0
+            realZero = tic;                % start wall clock
+            polled   = toc(realZero);
+            run = toc(realZero);
+        end
+        % simElapsed  = block.CurrentTime  - simZero;
+        realElapsed = toc(realZero);
+        % % fprintf('SimTime=%.3f  RealElapsed=%.3f\n', simElapsed, realElapsed);
+        % ── Poll for new frames ───────────────────────────────
+        if pipe.poll_for_frames()
+            temp = toc(realZero) - polled;
+            fprintf('polled every=%.3f', temp);
+            polled = toc(realZero);
+            % Grab the fresh set
+            fs = pipe.wait_for_frames();
+            
+            % Rebuild the color vector only now
+            % cfrm = fs.get_color_frame();
+            % lastColorVec = frameToVec(cfrm,vecLen);
+            
+            % Always update IMU too
+            afrm = fs.first(realsense.stream.accel).as('motion_frame');
+            gfrm = fs.first(realsense.stream.gyro ).as('motion_frame');
+            lastAccel    = single(afrm.get_motion_data());
+            lastGyro     = single(gfrm.get_motion_data());
+            
+            delete(fs);      % free old handles
         end
 
-        fs   = pipe.wait_for_frames();      % blocking read
+        temp = toc(realZero) - run;
+        fprintf('running=%.3f\n', temp);
+        run = toc(realZero);
 
-        % Colour frame → vector
-        cfrm = fs.get_color_frame();
-        block.OutputPort(1).Data = frameToVec(cfrm, vecLen);
-
-        % IMU frames
-        afrm = fs.first(realsense.stream.accel).as('motion_frame');
-        gfrm = fs.first(realsense.stream.gyro ).as('motion_frame');
-        block.OutputPort(2).Data = single(afrm.get_motion_data());
-        block.OutputPort(3).Data = single(gfrm.get_motion_data());
-
-        delete(fs);                         % free native handles
+        % ── Output the cached values ──────────────────────────
+        % block.OutputPort(1).Data = lastColorVec;
+        block.OutputPort(2).Data = lastAccel;
+        block.OutputPort(3).Data = lastGyro;
     end
 
 %======================================================================%
@@ -93,6 +127,10 @@ setup(block);
             delete(pipe);
             pipe = [];
         end
+        % if ~isempty(lastFs)
+        %     delete(lastFs);
+        %     lastFs = [];
+        % end
     end
 
 %======================================================================%
