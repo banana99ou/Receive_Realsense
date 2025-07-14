@@ -39,10 +39,9 @@ class SimulinkUDPSender(threading.Thread):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         # IMU pack: [t_res_s(double), t_enqueue(double), t_send(double),
         #            ax,ay,az,gx,gy,gz] as 9 floats
-        self.imu_fmt = "<2d d 6f"
         if self.stream == "cam":
             # we'll send at 25 Hz by default, chunked JPEG
-            self.rate = 25.0
+            self.rate = 60
 
     def run(self):
         period = 1.0/self.rate
@@ -61,13 +60,15 @@ class SimulinkUDPSender(threading.Thread):
                 t_res_s = t_res_us * 1e-6
                 t_send = time.perf_counter()
                 payload = struct.pack(
-                    self.imu_fmt,
-                    t_res_s, t_enqueue,
-                    t_send,
+                    "<6f",#"<2d d 6f",
+                    # t_res_s, t_enqueue,
+                    # t_send,
                     imu["ax"], imu["ay"], imu["az"],
                     imu["gx"], imu["gy"], imu["gz"]
                 )
                 self.sock.sendto(payload, (self.ip, self.port))
+                tmp = imu["ax"]
+                print(f"{tmp} {len(payload)} {next_ts}")
 
             else:  # camera
                 _, _, _, jpeg_bytes, _ = pkt
@@ -82,10 +83,11 @@ class SimulinkUDPSender(threading.Thread):
                 frame_id = (frame_id+1) & 0xFFFFFFFF
 
             # pacing
-            now = time.monotonic()
-            if now < next_ts:
-                time.sleep(next_ts - now)
-            next_ts += period
+            # now = time.monotonic()
+            # if now < next_ts:
+            #     time.sleep(next_ts - now)
+            # next_ts += period
+            time.sleep(period)
 
 
 def main():
@@ -99,7 +101,7 @@ def main():
 
     shared = SharedPacket()
     # start sender threads
-    imu_sender = SimulinkUDPSender("imu", shared, SIMULINK_IP, IMU_PORT, sample_rate=100.0)
+    imu_sender = SimulinkUDPSender("imu", shared, SIMULINK_IP, IMU_PORT, sample_rate=60.0)
     cam_sender = SimulinkUDPSender("cam", shared, SIMULINK_IP, CAM_PORT, sample_rate=25.0)
     imu_sender.start()
     cam_sender.start()
