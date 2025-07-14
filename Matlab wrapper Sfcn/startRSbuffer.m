@@ -41,6 +41,8 @@ function bufferFetch(~,~)
     % Called by RS_TIMER at ~30 Hz
     global RS_BUFFER RS_ACCEL RS_GYRO RS_PIPE
 
+    t0 = tic;
+
     fs = RS_PIPE.wait_for_frames();             % blocks ~1/30 s
     % 1) Colour frame → H×W×3 uint8
     cfrm = fs.get_color_frame();
@@ -55,4 +57,7 @@ function bufferFetch(~,~)
     RS_GYRO  = single(gfrm.get_motion_data());
 
     delete(fs);
+
+    execTime = toc(t0);
+    fprintf('    Work=%.3f s\n\n', execTime);
 end
