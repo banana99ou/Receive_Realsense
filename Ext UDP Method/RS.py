@@ -16,6 +16,9 @@ IMU_PORT       = 5005
 CAM_PORT       = 5006
 # ————————————————————————————————————————
 
+IMG_W = 320#640
+IMG_H = 240#480
+
 class SharedPacket:
     """Holds the latest sensor packet with a lock."""
     def __init__(self):
@@ -28,7 +31,7 @@ class SimulinkUDPSender(threading.Thread):
     over UDP at a given rate.
     """
     def __init__(self, stream_type, shared, ip, port,
-                 sample_rate=100.0, udp_chunk_size=8192):
+                 sample_rate=100.0, udp_chunk_size=9600):#8192):
         super().__init__(daemon=True)
         assert stream_type in ("imu", "cam")
         self.stream = stream_type
@@ -71,30 +74,36 @@ class SimulinkUDPSender(threading.Thread):
                 print(f"{tmp} {len(payload)} {next_ts}")
 
             else:  # camera
+                # unpack the JPEG we got
                 _, _, _, jpeg_bytes, _ = pkt
-                total = len(jpeg_bytes)
+
+                # 1) decode JPEG → grayscale
+                arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+                img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+
+                # 2) resize to exactly what the S-Function wants:
+                #    note: cv2.resize takes (width, height)
+                img = cv2.resize(img, (IMG_W, IMG_H))   # e.g. (320,240)
+
+                # 3) flatten to raw bytes
+                frame_bytes = img.T.tobytes()
+
+                # 4) chunk exactly as before, but now with raw pixels
+                total    = len(frame_bytes)  # should be IMG_W*IMG_H
                 n_chunks = math.ceil(total/self.chunk)
                 for cid in range(n_chunks):
-                    off = cid*self.chunk
-                    chunk = jpeg_bytes[off:off+self.chunk]
-                    # header: [frame_id(uint32), chunk_id(uint16), total_chunks(uint16)]
-                    hdr = struct.pack("<IHH", frame_id, cid, n_chunks)
+                    off   = cid*self.chunk
+                    chunk = frame_bytes[off:off+self.chunk]
+                    hdr   = struct.pack("<IHH", frame_id, cid, n_chunks)
                     self.sock.sendto(hdr + chunk, (self.ip, self.port))
                 frame_id = (frame_id+1) & 0xFFFFFFFF
-
-            # pacing
-            # now = time.monotonic()
-            # if now < next_ts:
-            #     time.sleep(next_ts - now)
-            # next_ts += period
-            time.sleep(period)
 
 
 def main():
     # 1) Setup RealSense
     pipe = rs.pipeline()
     cfg  = rs.config()
-    cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 60)
+    cfg.enable_stream(rs.stream.color, IMG_W, IMG_H, rs.format.bgr8, 60)
     cfg.enable_stream(rs.stream.accel)
     cfg.enable_stream(rs.stream.gyro)
     pipe.start(cfg)
