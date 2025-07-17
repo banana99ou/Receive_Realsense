@@ -191,7 +191,7 @@ def main():
 
             # --- write to CSV: use sensor timestamps ---
             csv_writer.writerow([
-                int(t_accel - t_accel_0), int(t_color - t_color_0),
+                round(t_color - t_color_0, 3), round(t_accel - t_accel_0, 3), 
                 imu["ax"], imu["ay"], imu["az"],
                 imu["gx"], imu["gy"], imu["gz"]
             ])
