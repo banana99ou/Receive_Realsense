@@ -4,11 +4,12 @@ import time
 import math
 import struct
 import socket
+import datetime
+import csv
 
 import numpy as np
 import cv2
 import pyrealsense2 as rs
-
 
 # —————— Your Simulink target IP/ports ——————
 SIMULINK_IP    = "127.0.0.1"
@@ -104,9 +105,30 @@ def main():
     pipe = rs.pipeline()
     cfg  = rs.config()
     cfg.enable_stream(rs.stream.color, IMG_W, IMG_H, rs.format.bgr8, 60)
-    cfg.enable_stream(rs.stream.accel)
-    cfg.enable_stream(rs.stream.gyro)
+    cfg.enable_stream(rs.stream.accel, rs.format.motion_xyz32f, 100)
+    cfg.enable_stream(rs.stream.gyro, rs.format.motion_xyz32f, 200)
     pipe.start(cfg)
+
+    # 2) Prepare file names with start timestamp (down to milliseconds)
+    start_time = datetime.datetime.now()
+    ts_str = start_time.strftime("%Y%m%d_%H%M%S_%f")[:-3]  # e.g. "20250717_161234_123"
+    csv_path   = f"data_{ts_str}.csv"
+    video_path = f"video_{ts_str}.avi"
+
+    # 3) Open CSV and write header
+    csv_file   = open(csv_path, mode='w', newline='')
+    csv_writer = csv.writer(csv_file)
+    csv_writer.writerow([
+        't_accel_us', 't_color_us',
+        'ax','ay','az','gx','gy','gz'
+    ])
+
+    # 4) Open VideoWriter (XVID @ 60 FPS, BGR color)
+    fourcc      = cv2.VideoWriter_fourcc(*'XVID')
+    video_writer = cv2.VideoWriter(
+        video_path, fourcc, 60.0,
+        (IMG_W, IMG_H), isColor=True
+    )
 
     shared = SharedPacket()
     # start sender threads
@@ -116,9 +138,12 @@ def main():
     cam_sender.start()
 
     try:
-        print("Running. CTRL+C to exit.")
+        print(f"Running.CTRL+C to exit. Logging to {csv_path} & {video_path}")
         start_t = time.time()
         frame_ct = 0
+
+        t_color_0 = None
+        t_accel_0 = None
 
         while True:
             frames = pipe.wait_for_frames()
@@ -128,7 +153,7 @@ def main():
             if not cf:
                 continue
             color = np.asanyarray(cf.get_data())
-            t_color = cf.get_timestamp() * 1000.0  # to microseconds
+            t_color = cf.get_timestamp()   # to ms
             # encode to JPEG
             ok, enc = cv2.imencode('.jpg', color, [cv2.IMWRITE_JPEG_QUALITY, 90])
             if not ok:
@@ -146,9 +171,13 @@ def main():
                 "ax": a.x, "ay": a.y, "az": a.z,
                 "gx": g.x, "gy": g.y, "gz": g.z
             }
-            t_accel = af.get_timestamp()*1000.0  # µs
+            t_accel = af.get_timestamp() # to ms
             # use t_color for camera timestamp, but you can also use t_accel if desired
             t_enqueue = time.perf_counter()
+
+            if t_color_0 is None:
+                t_color_0 = t_color
+                t_accel_0 = t_accel
 
             # update shared packet
             with shared.lock:
@@ -159,6 +188,19 @@ def main():
                     jpeg,
                     t_color       # raw color timestamp μs
                 )
+
+            # --- write to CSV: use sensor timestamps ---
+            csv_writer.writerow([
+                int(t_accel - t_accel_0), int(t_color - t_color_0),
+                imu["ax"], imu["ay"], imu["az"],
+                imu["gx"], imu["gy"], imu["gz"]
+            ])
+
+            # --- write frame to video (BGR color) ---
+            # Note: VideoWriter expects (width,height) same as IMG_W,IMG_H
+            #       if your capture is larger, resize first.
+            small = cv2.resize(color, (IMG_W, IMG_H))
+            video_writer.write(small)
 
             # (optional) display
             cv2.putText(color, f"FPS {frame_ct/(time.time()-start_t):.1f}",
@@ -175,8 +217,11 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        # clean up
         pipe.stop()
         cv2.destroyAllWindows()
+        csv_file.close()
+        video_writer.release()
         print("Exiting.")
 
 if __name__ == "__main__":
