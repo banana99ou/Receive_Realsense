@@ -38,31 +38,31 @@ function realsense_sfun(block)
         global RS_BUFFER RS_ACCEL RS_GYRO
 
         % — initialize sim0/wall0 on first call —
-        persistent sim0 wall0 prevTickWall
-        if isempty(sim0)
-            sim0  = block.CurrentTime;
-            wall0 = tic;             % start wall clock
-            prevTickWall = 0;
-        end
+        % persistent sim0 wall0 prevTickWall
+        % if isempty(sim0)
+        %     sim0  = block.CurrentTime;
+        %     wall0 = tic;             % start wall clock
+        %     prevTickWall = 0;
+        % end
 
         % — stamp times —
-        simTime  = block.CurrentTime - sim0;
-        wallTime = toc(wall0);
-        fprintf('>>> Tick start: Sim=%.3f  Wall=%.3f\n', simTime, wallTime);
+        % simTime  = block.CurrentTime - sim0;
+        % wallTime = toc(wall0);
+        % fprintf('>>> Tick start: Sim=%.3f  Wall=%.3f\n', simTime, wallTime);
 
         % — measure our work —
-        t0 = tic;
+        % t0 = tic;
         imgVec = reshape(RS_BUFFER,[],1);  % very cheap
         % accel/gyro are just copies
         block.OutputPort(1).Data = imgVec;
         block.OutputPort(2).Data = RS_ACCEL;
         block.OutputPort(3).Data = RS_GYRO;
-        execTime = toc(t0);
+        % execTime = toc(t0);
 
         % — drift vs perfect real time —
-        drift = wallTime - simTime;
-        fprintf('    Work=%.3f ms,  Drift=%.3f ms\n\n', execTime*1000, drift*1000);
+        % drift = wallTime - simTime;
+        % fprintf('    Work=%.3f ms,  Drift=%.3f s\n\n', execTime*1000, drift);
 
-        prevTickWall = wallTime;
+        % prevTickWall = wallTime;
     end
 end
