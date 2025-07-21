@@ -37,7 +37,7 @@ class SimulinkUDPSender(threading.Thread):
     Reads from shared_packet.data and sends either IMU or camera
     over UDP at a given rate.
     """
-    def __init__(self, stream_type, shared, ip, port, sample_rate, udp_chunk_size=8192):
+    def __init__(self, stream_type, shared, ip, port, sample_rate, udp_chunk_size=9600):#8192):#
         super().__init__(daemon=True)
         assert stream_type in ("imu", "cam")
         self.stream = stream_type
@@ -175,8 +175,8 @@ def main():
                 # Simple preview
                 fps_counter += 1
                 now = time.time()
+                cv2.putText(img, f"FPS~{fps_counter/(now-last_fps_print):.1f}", (5,25), cv2.FONT_HERSHEY_SIMPLEX, 0.7,(0,255,0),2)
                 if now - last_fps_print >= 1.0:
-                    cv2.putText(img, f"FPS~{fps_counter/(now-last_fps_print):.1f}", (5,25), cv2.FONT_HERSHEY_SIMPLEX, 0.7,(0,255,0),2)
                     last_fps_print = now
                     fps_counter = 0
                 cv2.imshow("RGB", img)
