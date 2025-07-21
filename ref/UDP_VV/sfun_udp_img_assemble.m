@@ -109,8 +109,8 @@ function Outputs(block)
         end
         block.Dwork(3).Data(total_chunks+1:end) = 0;
 
-        % cnt = cnt+1;
-        % if cnt>=max_iter, break; end
+        cnt = cnt+1;
+        if cnt>=max_iter, break; end
     end
 
     % 완성여부 판정
