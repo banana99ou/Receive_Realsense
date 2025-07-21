@@ -8,3 +8,6 @@ matlab.mat
 data_*.csv
 data_*.xlsx
 video_*.avi
+recording_*
+record_*
+*.fig
