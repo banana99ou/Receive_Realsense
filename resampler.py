@@ -7,13 +7,10 @@ from tqdm import tqdm
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--path", required=True,
-                    help="Recording directory produced by RS_capture.py")
+    ap.add_argument("--path", required=True, help="Recording directory produced by RS_capture.py")
     ap.add_argument("--target_hz", type=int, default=100)
-    ap.add_argument("--make_video", type=int, default=1,
-                    help="1=create resampled ZOH video, 0=skip")
-    ap.add_argument("--video_rate", type=int, default=100,
-                    help="Output video FPS (ZOH)")
+    ap.add_argument("--make_video", type=int, default=1, help="1=create resampled ZOH video, 0=skip")
+    ap.add_argument("--video_rate", type=int, default=100, help="Output video FPS (ZOH)")
     ap.add_argument("--frame_glob", default="frames/frame_*.jpg")
     return ap.parse_args()
 
@@ -44,6 +41,7 @@ def resample_imu(df, target_hz):
     if imu_us.size == 0:
         raise RuntimeError("Empty IMU data.")
     t_end_us = imu_us[-1]
+    print(t_end_us)
     dt_us    = int(1_000_000 / target_hz)
     uniform_us = np.arange(0, t_end_us + 1, dt_us, dtype=np.int64)
 
@@ -98,6 +96,8 @@ def main():
     res_df.to_csv(imu_out_csv, index=False)
     print(f"[INFO] IMU resampled CSV: {imu_out_csv} ({len(res_df)} rows)")
 
+    print(f"[REPORT] Raw video span: {frames_us[-1]/1e6:.3f}s | "f"Resampled IMU span: {res_df['t_sec'].iloc[-1]:.3f}s")
+
     if args.make_video:
         vid_out = os.path.join(record_dir, f"video_zoh_{args.video_rate}Hz.avi")
         print("[INFO] Building ZOH video...")
@@ -105,8 +105,7 @@ def main():
         print(f"[INFO] ZOH video written: {vid_out}")
 
     # Simple report
-    print(f"[REPORT] Raw video span: {frames_us[-1]/1e6:.3f}s | "
-          f"Resampled IMU span: {res_df['t_sec'].iloc[-1]:.3f}s")
+    print(f"[REPORT] Raw video span: {frames_us[-1]/1e6:.3f}s | "f"Resampled IMU span: {res_df['t_sec'].iloc[-1]:.3f}s")
 
 if __name__ == "__main__":
     main()
