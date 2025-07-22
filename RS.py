@@ -87,6 +87,21 @@ class SimulinkUDPSender(threading.Thread):
             
             time.sleep(self.period)
 
+def start_heartbeat_listener(ip, port, last_hb):
+    """
+    Binds to (ip,port) and whenever a UDP packet arrives,
+    updates last_hb[0] to now(). Runs forever as daemon.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind((ip, port))
+    # No timeout needed: blocking here is fine, it's in its own thread
+    while True:
+        try:
+            sock.recvfrom(16)
+            last_hb[0] = time.perf_counter()
+        except Exception:
+            break  # on any socket error, thread will exit
+
 def ensure_dir(p):
     os.makedirs(p, exist_ok=True)
     return p
@@ -94,7 +109,7 @@ def ensure_dir(p):
 def main():
     # ----- Output directory -----
     session_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-    record_dir = f"record_{session_ts}"
+    record_dir = f"recording_{session_ts}"
     frames_dir = ensure_dir(os.path.join(record_dir, "frames"))
     raw_imu_csv_path = os.path.join(record_dir, "imu_raw.csv")
     print(f"[INFO] Recording into: {record_dir}")
@@ -121,6 +136,18 @@ def main():
     video_frame_count = 0
     first_video_time = None
     last_video_time  = None
+
+    START_PORT = 6000
+    # timeout after two IMU-periods (2/99s ~ 0.02s)
+    HB_TIMEOUT = 0.5 #2.0 / UDP_IMU_RATE
+    last_hb = [None]
+    hb_thread = threading.Thread(
+        target=start_heartbeat_listener,
+        args=(SIMULINK_IP, START_PORT, last_hb),
+        daemon=True
+    )
+    hb_thread.start()
+
     # ----- Shared + UDP senders -----
     shared     = SharedPacket()
     imu_sender = SimulinkUDPSender("imu", shared, SIMULINK_IP, IMU_PORT, UDP_IMU_RATE)
@@ -142,22 +169,19 @@ def main():
     last_fps_print = time.time()
     fps_counter = 0
 
-    START_PORT = 6000
-    start_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    start_sock.bind((SIMULINK_IP, START_PORT))
-    start_sock.setblocking(False)
-    start_received = False
+    # START_PORT = 6000
+    # start_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # start_sock.bind((SIMULINK_IP, START_PORT))
+    # start_sock.setblocking(False)
+    # start_received = False
 
     try:
         while True:
-            #─── poll for Simulink “start” ───#
-            if not start_received:
-                try:
-                    pkt, _ = start_sock.recvfrom(10)
-                    start_received = True
-                    print("[INFO] got START from Simulink")
-                except BlockingIOError:
-                    pass
+            # heartbeat-timeout check at top of loop
+            hb = last_hb[0]
+            if hb is not None and (time.perf_counter() - hb) > HB_TIMEOUT:
+                print(f"[INFO] no heartbeat for {HB_TIMEOUT:.3f}s → exiting")
+                break
 
             frame = q.wait_for_frame()
             prof  = frame.get_profile()
@@ -166,8 +190,9 @@ def main():
             # —— Color frame —— #
             if Stream_Type == rs.stream.color:
                 ts_ms = frame.get_timestamp()  # ms
-                if start_received and (t0_color is None):
+                if hb is not None and (t0_color is None):
                     t0_color = ts_ms
+                    print("[INFO] first heartbeat received!")
                     # t0_accel = None
 
                 raw = frame.get_data()
@@ -190,7 +215,7 @@ def main():
                 fps_counter += 1
                 now = time.time()
                 cv2.putText(img, f"FPS~{fps_counter/(now-last_fps_print):.1f}", (5,25), cv2.FONT_HERSHEY_SIMPLEX, 0.7,(0,255,0),2)
-                if now - last_fps_print >= 1.0:
+                if now - last_fps_print >= 0.5:
                     last_fps_print = now
                     fps_counter = 0
                 cv2.imshow("RGB", img)
@@ -202,7 +227,7 @@ def main():
                 ts_ms = frame.get_timestamp()
                 # if not last_color_us or not last_jpeg:
                 #     continue  # wait until we have at least one frame
-                if start_received and (t0_accel is None) and (t0_color is not None):
+                if hb is not None and (t0_accel is None) and (t0_color is not None):
                     t0_accel = ts_ms
 
                 if t0_accel is not None:
@@ -236,6 +261,7 @@ def main():
     finally:
         pipe.stop()
         cv2.destroyAllWindows()
+        csv_file.close()
 
         # ----- Auto-run resampler -----
         try:
