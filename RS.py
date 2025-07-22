@@ -21,8 +21,8 @@ JPEG_QUALITY = 90
 IMU_RATE_REQ = 100   # requested accel Hz
 GYRO_RATE_REQ= 200
 COLOR_RATE   = 60
-UDP_IMU_RATE = 100.0
-UDP_CAM_RATE = 60.0
+UDP_IMU_RATE = 99.0
+UDP_CAM_RATE = 59.0
 # =================================================
 
 class SharedPacket:
@@ -37,7 +37,7 @@ class SimulinkUDPSender(threading.Thread):
     Reads from shared_packet.data and sends either IMU or camera
     over UDP at a given rate.
     """
-    def __init__(self, stream_type, shared, ip, port, sample_rate, udp_chunk_size=9600):#8192):#
+    def __init__(self, stream_type, shared, ip, port, sample_rate, udp_chunk_size=10000):#9600):#8192):#
         super().__init__(daemon=True)
         assert stream_type in ("imu", "cam")
         self.stream = stream_type
@@ -142,8 +142,23 @@ def main():
     last_fps_print = time.time()
     fps_counter = 0
 
+    START_PORT = 6000
+    start_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    start_sock.bind((SIMULINK_IP, START_PORT))
+    start_sock.setblocking(False)
+    start_received = False
+
     try:
         while True:
+            #─── poll for Simulink “start” ───#
+            if not start_received:
+                try:
+                    pkt, _ = start_sock.recvfrom(10)
+                    start_received = True
+                    print("[INFO] got START from Simulink")
+                except BlockingIOError:
+                    pass
+
             frame = q.wait_for_frame()
             prof  = frame.get_profile()
             Stream_Type = prof.stream_type()
@@ -151,26 +166,25 @@ def main():
             # —— Color frame —— #
             if Stream_Type == rs.stream.color:
                 ts_ms = frame.get_timestamp()  # ms
-                if t0_color is None:
+                if start_received and (t0_color is None):
                     t0_color = ts_ms
-                    # enforce accel zero alignment on first color frame:
-                    if t0_accel is None:
-                        t0_accel = None  # force accel branch to set when first accel after color arrives
-                rel_color_us = int((ts_ms - t0_color) * 1000)
+                    # t0_accel = None
 
                 raw = frame.get_data()
                 arr = np.frombuffer(raw, dtype=np.uint8)
                 img = arr.reshape((IMG_H, IMG_W, 3))
                 # Save JPEG frame with timestamp in filename
-                fname = os.path.join(frames_dir, f"frame_{rel_color_us}.jpg")
-                cv2.imwrite(fname, img, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+                if t0_color is not None:
+                    rel_color_us = int((ts_ms - t0_color) * 1000)
+                    fname = os.path.join(frames_dir, f"frame_{rel_color_us}.jpg")
+                    cv2.imwrite(fname, img, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
 
-                # Prepare grayscale JPEG for UDP sender (compress once)
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                ok, enc = cv2.imencode(".jpg", gray, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-                if ok:
-                    last_jpeg = enc.tobytes()
-                    last_color_us = rel_color_us
+                    # Prepare grayscale JPEG for UDP sender (compress once)
+                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    ok, enc = cv2.imencode(".jpg", gray, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+                    if ok:
+                        last_jpeg = enc.tobytes()
+                        last_color_us = rel_color_us
 
                 # Simple preview
                 fps_counter += 1
@@ -184,32 +198,33 @@ def main():
                     break
                 frame_count += 1
 
-            elif Stream_Type == rs.stream.accel:
+            if Stream_Type == rs.stream.accel:
                 ts_ms = frame.get_timestamp()
-                if last_jpeg is not None and t0_accel is None:
+                # if not last_color_us or not last_jpeg:
+                #     continue  # wait until we have at least one frame
+                if start_received and (t0_accel is None) and (t0_color is not None):
                     t0_accel = ts_ms
-                rel_accel_us = int((ts_ms - t0_accel) * 1000)
 
-                if not last_color_us or not last_jpeg:
-                    continue  # wait until we have at least one frame
+                if t0_accel is not None:
+                    rel_accel_us = int((ts_ms - t0_accel) * 1000)
 
-                md = frame.as_motion_frame().get_motion_data()
-                imu = {
-                    "ax": md.x, "ay": md.y, "az": md.z,
-                    **last_gyro
-                }
-                t_enqueue = time.perf_counter()
+                    md = frame.as_motion_frame().get_motion_data()
+                    imu = {
+                        "ax": md.x, "ay": md.y, "az": md.z,
+                        **last_gyro
+                    }
+                    t_enqueue = time.perf_counter()
 
-                # Update shared packet for UDP threads
-                with shared.lock:
-                    shared.data = (rel_accel_us, t_enqueue, imu, last_jpeg, last_color_us)
+                    # Update shared packet for UDP threads
+                    with shared.lock:
+                        shared.data = (rel_accel_us, t_enqueue, imu, last_jpeg, last_color_us)
 
-                # write CSV
-                csv_writer.writerow((
-                    rel_accel_us, last_color_us,
-                    imu["ax"], imu["ay"], imu["az"],
-                    imu["gx"], imu["gy"], imu["gz"]
-                ))
+                    # write CSV
+                    csv_writer.writerow((
+                        rel_accel_us, last_color_us,
+                        imu["ax"], imu["ay"], imu["az"],
+                        imu["gx"], imu["gy"], imu["gz"]
+                    ))
 
             elif Stream_Type == rs.stream.gyro:
                 md = frame.as_motion_frame().get_motion_data()
