@@ -10,6 +10,7 @@ import sys
 import subprocess
 import numpy as np
 import cv2
+import serial, zlib
 import pyrealsense2 as rs
 
 # ================= User Config =================
@@ -24,6 +25,72 @@ COLOR_RATE   = 60
 UDP_IMU_RATE = 99.0
 UDP_CAM_RATE = 59.0
 # =================================================
+
+class SerialIMUThread(threading.Thread):
+    """Read lines from Serial, parse CSV+CRC, write to its own imu_serial.csv."""
+    def __init__(self, port, baudrate, out_dir, max_gap=1.0):
+        super().__init__(daemon=True)
+        self.port     = port
+        self.baudrate = baudrate
+        self.max_gap  = max_gap
+        self.out_dir  = out_dir
+
+    def run(self):
+        ser = serial.Serial(self.port, self.baudrate, timeout=0.1)
+        # open csv
+        fname = os.path.join(self.out_dir, f"imu_serial_{datetime.datetime.now():%Y%m%d_%H%M%S}_{self.port}.csv")
+        with open(fname, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['t_us','t_s','t_rel', 'ax','ay','az', 'gx','gy','gz','crc'])
+
+            t0 = None
+            last_recv = time.time()
+            print(f"[SERIAL] Logging to {fname}")
+
+            while True:
+                line = ser.readline().decode(errors='ignore').strip()
+                if not line:
+                    if time.time() - last_recv > self.max_gap:
+                        print(f"[SERIAL] ⚠️  No data for {self.max_gap}s")
+                        last_recv = time.time()
+                    continue
+                last_recv = time.time()
+
+                parts = line.split(',')
+                if len(parts) != 11:
+                    print(f"[SERIAL] ⚠️ Bad field count: {line}")
+                    continue
+
+                data_str = ','.join(parts[:-1])
+                recv_crc = int(parts[-1], 16)
+                calc_crc = zlib.crc32(data_str.encode()) & 0xFFFFFFFF
+                if calc_crc != recv_crc:
+                    print(f"[SERIAL] ❌ CRC mismatch: {parts[-1]} vs {calc_crc:08X}")
+                    continue
+
+                t_us = int(parts[0])
+                t_s  = t_us/1e6
+                if t0 is None:
+                    t0 = t_s
+                t_rel = t_s - t0
+
+                ax, ay, az = map(float, parts[1:4])
+                gx, gy, gz = map(float, parts[4:7])
+                crc_hex    = parts[10]
+
+                vals = list(map(float, parts[1:-1]))
+                writer.writerow([
+                    t_us,
+                    f"{t_s:.6f}",
+                    f"{t_rel:.6f}",
+                    f"{ax:.6f}", f"{ay:.6f}", f"{az:.6f}",
+                    f"{gx:.6f}", f"{gy:.6f}", f"{gz:.6f}",
+                    crc_hex
+                ])
+                f.flush()
+                os.fsync(f.fileno())
+
+        ser.close()
 
 class SharedPacket:
     """Holds the latest sensor packet with a lock."""
@@ -114,6 +181,16 @@ def main():
     raw_imu_csv_path = os.path.join(record_dir, "imu_raw.csv")
     print(f"[INFO] Recording into: {record_dir}")
 
+    # ----- START SERIAL IMU THREAD -----
+    # adjust port and baudrate to match your device
+    serial_thread = SerialIMUThread(
+        port   = 'COM4',
+        baudrate = 1000000,
+        out_dir = record_dir,
+        max_gap = 1.0
+    )
+    serial_thread.start()
+
     # ----- RealSense setup (single queue) -----
     q    = rs.frame_queue(32)
     pipe = rs.pipeline()
@@ -123,7 +200,7 @@ def main():
     cfg.enable_stream(rs.stream.gyro,  rs.format.motion_xyz32f, GYRO_RATE_REQ)
     pipe.start(cfg, q)
 
-    # 2) Prepare files
+    # ----- Prepare files -----
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
     csv_file   = open(raw_imu_csv_path, "w", newline='')
     csv_writer = csv.writer(csv_file)
@@ -132,13 +209,13 @@ def main():
         'ax','ay','az','gx','gy','gz'
     ])
 
-    # add counters for video frames
+    # ----- add counters for video frames -----
     video_frame_count = 0
     first_video_time = None
     last_video_time  = None
 
     START_PORT = 6000
-    # timeout after two IMU-periods (2/99s ~ 0.02s)
+    # ----- timeout after two IMU-periods (2/99s ~ 0.02s) -----
     HB_TIMEOUT = 0.5 #2.0 / UDP_IMU_RATE
     last_hb = [None]
     hb_thread = threading.Thread(
