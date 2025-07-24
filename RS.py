@@ -25,17 +25,20 @@ GYRO_RATE_REQ= 200
 COLOR_RATE   = 60
 UDP_IMU_RATE = 99.0
 UDP_CAM_RATE = 59.0
+HB_TIMEOUT = 0.5 #2.0 / UDP_IMU_RATE
 # =================================================
 
 class SerialIMUThread(threading.Thread):
     """Read lines from Serial, parse CSV+CRC, write to its own imu_serial.csv."""
-    def __init__(self, port, baudrate, out_dir, tag="imu1", max_gap=1.0):
+    def __init__(self, port, baudrate, out_dir, last_hb, hb_timeout, tag="imu1", max_gap=1.0):
         super().__init__(daemon=True)
-        self.port     = port
-        self.baudrate = baudrate
-        self.max_gap  = max_gap
-        self.out_dir  = out_dir
-        self.tag      = tag
+        self.port        = port
+        self.baudrate    = baudrate
+        self.max_gap     = max_gap
+        self.out_dir     = out_dir
+        self.tag         = tag
+        self.last_hb     = last_hb       # (shared list)
+        self.hb_timeout  = hb_timeout
 
     def run(self):
         ser = serial.Serial(self.port, self.baudrate, timeout=0.1)
@@ -50,6 +53,13 @@ class SerialIMUThread(threading.Thread):
             print(f"[SERIAL {self.tag}] Logging to {fname}")
 
             while True:
+                # check heartbeat timeout
+                hb = last_hb[0]
+                if hb is not None and (time.perf_counter() - hb) > HB_TIMEOUT:
+                    print(f"[INFO] no heartbeat for {HB_TIMEOUT:.3f}s → exiting")
+                    break
+
+                # read line
                 line = ser.readline().decode(errors='ignore').strip()
                 if not line:
                     if time.time() - last_recv > self.max_gap:
@@ -63,11 +73,16 @@ class SerialIMUThread(threading.Thread):
                     print(f"[SERIAL {self.tag}] ⚠️ Bad field count: {line}")
                     continue
 
+                # verify CRC
                 data_str = ','.join(parts[:-1])
                 recv_crc = int(parts[-1], 16)
                 calc_crc = zlib.crc32(data_str.encode()) & 0xFFFFFFFF
                 if calc_crc != recv_crc:
                     print(f"[SERIAL {self.tag}] ❌ CRC mismatch: {parts[-1]} vs {calc_crc:08X}")
+                    continue
+
+                # do not write with no heartbeat
+                if hb is None:
                     continue
 
                 t_us = int(parts[0])
@@ -78,6 +93,15 @@ class SerialIMUThread(threading.Thread):
 
                 ax, ay, az = map(float, parts[1:4])
                 gx, gy, gz = map(float, parts[4:7])
+
+                # convert unit
+                ax = 9.81 * ax
+                ay = 9.81 * ay
+                az = 9.81 * az
+                gx = np.deg2rad(gx)
+                gy = np.deg2rad(gy)
+                gz = np.deg2rad(gz)
+
                 crc_hex    = parts[10]
 
                 vals = list(map(float, parts[1:-1]))
@@ -191,6 +215,16 @@ def main():
     raw_imu_csv_path = os.path.join(record_dir, "imu_raw.csv")
     print(f"[INFO] Recording into: {record_dir}")
 
+    START_PORT = 6000
+    HB_TIMEOUT = 0.5 #2.0 / UDP_IMU_RATE
+    last_hb = [None]
+    hb_thread = threading.Thread(
+        target=start_heartbeat_listener,
+        args=(SIMULINK_IP, START_PORT, last_hb),
+        daemon=True
+    )
+    hb_thread.start()
+
     # ----- START SERIAL IMU THREADS -----
     SERIAL_IMUS = [
         {"port": args.portA, "baudrate": 115200, "tag": "Center_Console"},
@@ -199,11 +233,15 @@ def main():
 
     serial_threads = []
     for cfg_ser in SERIAL_IMUS:
-        t = SerialIMUThread(port=cfg_ser["port"],
-                            baudrate=cfg_ser["baudrate"],
-                            out_dir=record_dir,
-                            tag=cfg_ser["tag"],
-                            max_gap=1.0)
+        t = SerialIMUThread(
+            port       = cfg_ser["port"],
+            baudrate   = cfg_ser["baudrate"],
+            out_dir    = record_dir,
+            tag        = cfg_ser["tag"],
+            max_gap    = 1.0,
+            last_hb    = last_hb,
+            hb_timeout = HB_TIMEOUT
+        )
         t.start()
         serial_threads.append(t)
 
@@ -225,31 +263,12 @@ def main():
         'ax','ay','az','gx','gy','gz'
     ])
 
-    # ----- add counters for video frames -----
-    video_frame_count = 0
-    first_video_time = None
-    last_video_time  = None
-
-    START_PORT = 6000
-    # ----- timeout after two IMU-periods (2/99s ~ 0.02s) -----
-    HB_TIMEOUT = 0.5 #2.0 / UDP_IMU_RATE
-    last_hb = [None]
-    hb_thread = threading.Thread(
-        target=start_heartbeat_listener,
-        args=(SIMULINK_IP, START_PORT, last_hb),
-        daemon=True
-    )
-    hb_thread.start()
-
     # ----- Shared + UDP senders -----
     shared     = SharedPacket()
     imu_sender = SimulinkUDPSender("imu", shared, SIMULINK_IP, IMU_PORT, UDP_IMU_RATE)
     cam_sender = SimulinkUDPSender("cam", shared, SIMULINK_IP, CAM_PORT, UDP_CAM_RATE)
     imu_sender.start()
     cam_sender.start()
-
-    # ----- IMU buffering (faster than per-line CSV writes) -----
-    imu_rows = []  # each: (rel_accel_us, rel_color_us, ax, ay, az, gx, gy, gz)
 
     t0_color = None
     t0_accel = None
@@ -261,12 +280,6 @@ def main():
     frame_count = 0
     last_fps_print = time.time()
     fps_counter = 0
-
-    # START_PORT = 6000
-    # start_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    # start_sock.bind((SIMULINK_IP, START_PORT))
-    # start_sock.setblocking(False)
-    # start_received = False
 
     try:
         while True:
