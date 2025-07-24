@@ -8,6 +8,7 @@ import csv
 import os
 import sys
 import subprocess
+import argparse
 import numpy as np
 import cv2
 import serial, zlib
@@ -28,44 +29,45 @@ UDP_CAM_RATE = 59.0
 
 class SerialIMUThread(threading.Thread):
     """Read lines from Serial, parse CSV+CRC, write to its own imu_serial.csv."""
-    def __init__(self, port, baudrate, out_dir, max_gap=1.0):
+    def __init__(self, port, baudrate, out_dir, tag="imu1", max_gap=1.0):
         super().__init__(daemon=True)
         self.port     = port
         self.baudrate = baudrate
         self.max_gap  = max_gap
         self.out_dir  = out_dir
+        self.tag      = tag
 
     def run(self):
         ser = serial.Serial(self.port, self.baudrate, timeout=0.1)
         # open csv
-        fname = os.path.join(self.out_dir, f"imu_serial_{datetime.datetime.now():%Y%m%d_%H%M%S}_{self.port}.csv")
+        fname = os.path.join(self.out_dir, f"{self.tag}_serial_{datetime.datetime.now():%Y%m%d_%H%M%S}_{self.port}.csv")
         with open(fname, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['t_us','t_s','t_rel', 'ax','ay','az', 'gx','gy','gz','crc'])
 
             t0 = None
             last_recv = time.time()
-            print(f"[SERIAL] Logging to {fname}")
+            print(f"[SERIAL {self.tag}] Logging to {fname}")
 
             while True:
                 line = ser.readline().decode(errors='ignore').strip()
                 if not line:
                     if time.time() - last_recv > self.max_gap:
-                        print(f"[SERIAL] ⚠️  No data for {self.max_gap}s")
+                        print(f"[SERIAL {self.tag}] ⚠️  No data for {self.max_gap}s")
                         last_recv = time.time()
                     continue
                 last_recv = time.time()
 
                 parts = line.split(',')
                 if len(parts) != 11:
-                    print(f"[SERIAL] ⚠️ Bad field count: {line}")
+                    print(f"[SERIAL {self.tag}] ⚠️ Bad field count: {line}")
                     continue
 
                 data_str = ','.join(parts[:-1])
                 recv_crc = int(parts[-1], 16)
                 calc_crc = zlib.crc32(data_str.encode()) & 0xFFFFFFFF
                 if calc_crc != recv_crc:
-                    print(f"[SERIAL] ❌ CRC mismatch: {parts[-1]} vs {calc_crc:08X}")
+                    print(f"[SERIAL {self.tag}] ❌ CRC mismatch: {parts[-1]} vs {calc_crc:08X}")
                     continue
 
                 t_us = int(parts[0])
@@ -87,6 +89,9 @@ class SerialIMUThread(threading.Thread):
                     f"{gx:.6f}", f"{gy:.6f}", f"{gz:.6f}",
                     crc_hex
                 ])
+                if int(t_rel*IMU_RATE_REQ) % 1000 == 0:
+                    print(f"[SERIAL {self.tag}] {self.tag} {int(t_rel*IMU_RATE_REQ)} samples in, last accel={ax:.3f}")
+
                 f.flush()
                 os.fsync(f.fileno())
 
@@ -174,6 +179,11 @@ def ensure_dir(p):
     return p
 
 def main():
+    args = argparse.ArgumentParser()
+    args.add_argument("--portA", default="COM4")
+    args.add_argument("--portB", default="COM6")
+    args= args.parse_args()
+
     # ----- Output directory -----
     session_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
     record_dir = f"recording_{session_ts}"
@@ -181,15 +191,21 @@ def main():
     raw_imu_csv_path = os.path.join(record_dir, "imu_raw.csv")
     print(f"[INFO] Recording into: {record_dir}")
 
-    # ----- START SERIAL IMU THREAD -----
-    # adjust port and baudrate to match your device
-    serial_thread = SerialIMUThread(
-        port   = 'COM4',
-        baudrate = 1000000,
-        out_dir = record_dir,
-        max_gap = 1.0
-    )
-    serial_thread.start()
+    # ----- START SERIAL IMU THREADS -----
+    SERIAL_IMUS = [
+        {"port": args.portA, "baudrate": 115200, "tag": "Center_Console"},
+        {"port": args.portB, "baudrate": 115200, "tag": "Headrest"},
+    ]
+
+    serial_threads = []
+    for cfg_ser in SERIAL_IMUS:
+        t = SerialIMUThread(port=cfg_ser["port"],
+                            baudrate=cfg_ser["baudrate"],
+                            out_dir=record_dir,
+                            tag=cfg_ser["tag"],
+                            max_gap=1.0)
+        t.start()
+        serial_threads.append(t)
 
     # ----- RealSense setup (single queue) -----
     q    = rs.frame_queue(32)
