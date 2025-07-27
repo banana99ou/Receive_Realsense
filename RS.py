@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""
+!this code must be at same directory as rec(ording folder
+talks to realsense D435i(via SDK) and (optional) IMU modules(via Serial)
+and save/send that data over UDP formatted for simulink's S-functtion
+"""
 import threading
 import time
 import struct

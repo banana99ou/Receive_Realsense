@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""
+!this code must be at same directory as recording folder
+takes csv files and Jpeg files labeled with timestamp in microseconds 
+to 100Hz fixed timestep file and 100fps video file
+"""
 import argparse, os, re, glob
 import numpy as np
 import pandas as pd
