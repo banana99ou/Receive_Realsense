@@ -12,6 +12,7 @@ import argparse
 import numpy as np
 import cv2
 import serial, zlib
+from serial import SerialException
 import pyrealsense2 as rs
 
 # ================= User Config =================
@@ -41,32 +42,72 @@ class SerialIMUThread(threading.Thread):
         self.hb_timeout  = hb_timeout
 
     def run(self):
-        ser = serial.Serial(self.port, self.baudrate, timeout=0.1)
+        try:
+            ser = serial.Serial(self.port, self.baudrate, timeout=0.1)
+        except SerialException as e:
+            print(f"[ERROR][{self.tag}] Could not open serial port {self.port!r}: {e}")
+            return
+        # optional: disable auto-reset lines
+        # try:
+        #     ser.dtr = False
+        #     ser.rts = False
+        # except Exception:
+        #     pass
+        # 2) Delay + flush startup chatter
+        time.sleep(0.3)
+        ser.reset_input_buffer()
+
         # open csv
         fname = os.path.join(self.out_dir, f"{self.tag}_serial_{datetime.datetime.now():%Y%m%d_%H%M%S}_{self.port}.csv")
         with open(fname, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['t_us','t_s','t_rel', 'ax','ay','az', 'gx','gy','gz','crc'])
 
+            state = "waiting"      # waiting → calibrating → running
             t0 = None
             last_recv = time.time()
             print(f"[SERIAL {self.tag}] Logging to {fname}")
 
             while True:
                 # check heartbeat timeout
-                hb = last_hb[0]
+                hb = self.last_hb[0]
                 if hb is not None and (time.perf_counter() - hb) > HB_TIMEOUT:
-                    print(f"[INFO] no heartbeat for {HB_TIMEOUT:.3f}s → exiting")
+                    print(f"[SERIAL {self.tag}] no heartbeat for {HB_TIMEOUT:.3f}s → exiting")
                     break
 
                 # read line
-                line = ser.readline().decode(errors='ignore').strip()
+                try:
+                    line = ser.readline().decode(errors='ignore').strip()
+                    # print(f"{self.tag}_{line}")
+                except SerialException as e:
+                    print(f"[ERROR][{self.tag}] Serial read error on {self.port}: {e}")
+                    break
+                except Exception as e:
+                    print(f"[ERROR][{self.tag}] Unexpected error reading serial: {e}")
+                    break
                 if not line:
                     if time.time() - last_recv > self.max_gap:
                         print(f"[SERIAL {self.tag}] ⚠️  No data for {self.max_gap}s")
                         last_recv = time.time()
                     continue
                 last_recv = time.time()
+
+                # ——— state machine for calibration ———
+                if state == "waiting":
+                    if "Calibrate" in line:
+                        state = "calibrating"
+                        print(f"[SERIAL {self.tag}] Calibrating IMU… please wait")
+                    continue
+
+                if state == "calibrating":
+                    if "DMP ready" in line:
+                        state = "running"
+                        print(f"[SERIAL {self.tag}] ✅ Calibration complete! Logging data now.")
+                    continue
+
+                # do not write with no heartbeat
+                if hb is None:
+                    continue
 
                 parts = line.split(',')
                 if len(parts) != 11:
@@ -79,10 +120,6 @@ class SerialIMUThread(threading.Thread):
                 calc_crc = zlib.crc32(data_str.encode()) & 0xFFFFFFFF
                 if calc_crc != recv_crc:
                     print(f"[SERIAL {self.tag}] ❌ CRC mismatch: {parts[-1]} vs {calc_crc:08X}")
-                    continue
-
-                # do not write with no heartbeat
-                if hb is None:
                     continue
 
                 t_us = int(parts[0])
@@ -120,6 +157,7 @@ class SerialIMUThread(threading.Thread):
                 os.fsync(f.fileno())
 
         ser.close()
+        print(f"[SERIAL {self.tag}] Thread exiting cleanly.")
 
 class SharedPacket:
     """Holds the latest sensor packet with a lock."""
@@ -227,8 +265,8 @@ def main():
 
     # ----- START SERIAL IMU THREADS -----
     SERIAL_IMUS = [
-        {"port": args.portA, "baudrate": 115200, "tag": "Center_Console"},
-        {"port": args.portB, "baudrate": 115200, "tag": "Headrest"},
+        {"port": args.portA, "baudrate": 115200, "tag": "CentC"}, # cannot have _ in tag
+        {"port": args.portB, "baudrate": 115200, "tag": "HeadR"},
     ]
 
     serial_threads = []
