@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""
+!this code must be at same directory as rec(ording folder
+talks to realsense D435i(via SDK) and (optional) IMU modules(via Serial)
+and save/send that data over UDP formatted for simulink's S-functtion
+"""
 import threading
 import time
 import struct
@@ -8,8 +13,11 @@ import csv
 import os
 import sys
 import subprocess
+import argparse
 import numpy as np
 import cv2
+import serial, zlib
+from serial import SerialException
 import pyrealsense2 as rs
 
 # ================= User Config =================
@@ -21,9 +29,140 @@ JPEG_QUALITY = 90
 IMU_RATE_REQ = 100   # requested accel Hz
 GYRO_RATE_REQ= 200
 COLOR_RATE   = 60
-UDP_IMU_RATE = 100.0
-UDP_CAM_RATE = 60.0
+UDP_IMU_RATE = 99.0
+UDP_CAM_RATE = 59.0
+HB_TIMEOUT = 0.5 #2.0 / UDP_IMU_RATE
 # =================================================
+
+class SerialIMUThread(threading.Thread):
+    """Read lines from Serial, parse CSV+CRC, write to its own imu_serial.csv."""
+    def __init__(self, port, baudrate, out_dir, last_hb, hb_timeout, tag="imu1", max_gap=1.0):
+        super().__init__(daemon=True)
+        self.port        = port
+        self.baudrate    = baudrate
+        self.max_gap     = max_gap
+        self.out_dir     = out_dir
+        self.tag         = tag
+        self.last_hb     = last_hb       # (shared list)
+        self.hb_timeout  = hb_timeout
+
+    def run(self):
+        try:
+            ser = serial.Serial(self.port, self.baudrate, timeout=0.1)
+        except SerialException as e:
+            print(f"[ERROR][{self.tag}] Could not open serial port {self.port!r}: {e}")
+            return
+        # optional: disable auto-reset lines
+        # try:
+        #     ser.dtr = False
+        #     ser.rts = False
+        # except Exception:
+        #     pass
+        # 2) Delay + flush startup chatter
+        time.sleep(0.3)
+        ser.reset_input_buffer()
+
+        # open csv
+        fname = os.path.join(self.out_dir, f"{self.tag}_serial_{datetime.datetime.now():%Y%m%d_%H%M%S}_{self.port}.csv")
+        with open(fname, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['t_us','t_s','t_rel', 'ax','ay','az', 'gx','gy','gz','crc'])
+
+            state = "waiting"      # waiting → calibrating → running
+            t0 = None
+            last_recv = time.time()
+            print(f"[SERIAL {self.tag}] Logging to {fname}")
+
+            while True:
+                # check heartbeat timeout
+                hb = self.last_hb[0]
+                if hb is not None and (time.perf_counter() - hb) > HB_TIMEOUT:
+                    print(f"[SERIAL {self.tag}] no heartbeat for {HB_TIMEOUT:.3f}s → exiting")
+                    break
+
+                # read line
+                try:
+                    line = ser.readline().decode(errors='ignore').strip()
+                    # print(f"{self.tag}_{line}")
+                except SerialException as e:
+                    print(f"[ERROR][{self.tag}] Serial read error on {self.port}: {e}")
+                    break
+                except Exception as e:
+                    print(f"[ERROR][{self.tag}] Unexpected error reading serial: {e}")
+                    break
+                if not line:
+                    if time.time() - last_recv > self.max_gap:
+                        print(f"[SERIAL {self.tag}] ⚠️  No data for {self.max_gap}s")
+                        last_recv = time.time()
+                    continue
+                last_recv = time.time()
+
+                # ——— state machine for calibration ———
+                if state == "waiting":
+                    if "Calibrate" in line:
+                        state = "calibrating"
+                        print(f"[SERIAL {self.tag}] Calibrating IMU… please wait")
+                    continue
+
+                if state == "calibrating":
+                    if "DMP ready" in line:
+                        state = "running"
+                        print(f"[SERIAL {self.tag}] ✅ Calibration complete! Logging data now.")
+                    continue
+
+                # do not write with no heartbeat
+                if hb is None:
+                    continue
+
+                parts = line.split(',')
+                if len(parts) != 11:
+                    print(f"[SERIAL {self.tag}] ⚠️ Bad field count: {line}")
+                    continue
+
+                # verify CRC
+                data_str = ','.join(parts[:-1])
+                recv_crc = int(parts[-1], 16)
+                calc_crc = zlib.crc32(data_str.encode()) & 0xFFFFFFFF
+                if calc_crc != recv_crc:
+                    print(f"[SERIAL {self.tag}] ❌ CRC mismatch: {parts[-1]} vs {calc_crc:08X}")
+                    continue
+
+                t_us = int(parts[0])
+                t_s  = t_us/1e6
+                if t0 is None:
+                    t0 = t_s
+                t_rel = t_s - t0
+
+                ax, ay, az = map(float, parts[1:4])
+                gx, gy, gz = map(float, parts[4:7])
+
+                # convert unit
+                ax = 9.81 * ax
+                ay = 9.81 * ay
+                az = 9.81 * az
+                gx = np.deg2rad(gx)
+                gy = np.deg2rad(gy)
+                gz = np.deg2rad(gz)
+
+                crc_hex    = parts[10]
+
+                vals = list(map(float, parts[1:-1]))
+                writer.writerow([
+                    t_us,
+                    f"{t_s:.6f}",
+                    f"{t_rel:.6f}",
+                    f"{ax:.6f}", f"{ay:.6f}", f"{az:.6f}",
+                    f"{gx:.6f}", f"{gy:.6f}", f"{gz:.6f}",
+                    crc_hex
+                ])
+                if int(t_rel*IMU_RATE_REQ) % 1000 == 0:
+                    print(f"[SERIAL {self.tag}] {self.tag} {int(t_rel*IMU_RATE_REQ)} samples in, last accel={ax:.3f}")
+
+                f.flush()
+                os.fsync(f.fileno())
+
+        ser.close()
+        print(f"[SERIAL {self.tag}] Thread exiting cleanly.")
 
 class SharedPacket:
     """Holds the latest sensor packet with a lock."""
@@ -37,7 +176,7 @@ class SimulinkUDPSender(threading.Thread):
     Reads from shared_packet.data and sends either IMU or camera
     over UDP at a given rate.
     """
-    def __init__(self, stream_type, shared, ip, port, sample_rate, udp_chunk_size=8192):
+    def __init__(self, stream_type, shared, ip, port, sample_rate, udp_chunk_size=10000):#9600):#8192):#
         super().__init__(daemon=True)
         assert stream_type in ("imu", "cam")
         self.stream = stream_type
@@ -87,17 +226,67 @@ class SimulinkUDPSender(threading.Thread):
             
             time.sleep(self.period)
 
+def start_heartbeat_listener(ip, port, last_hb):
+    """
+    Binds to (ip,port) and whenever a UDP packet arrives,
+    updates last_hb[0] to now(). Runs forever as daemon.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind((ip, port))
+    # No timeout needed: blocking here is fine, it's in its own thread
+    while True:
+        try:
+            sock.recvfrom(16)
+            last_hb[0] = time.perf_counter()
+        except Exception:
+            break  # on any socket error, thread will exit
+
 def ensure_dir(p):
     os.makedirs(p, exist_ok=True)
     return p
 
 def main():
+    args = argparse.ArgumentParser()
+    args.add_argument("--portA", default="COM4")
+    args.add_argument("--portB", default="COM6")
+    args= args.parse_args()
+
     # ----- Output directory -----
     session_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-    record_dir = f"record_{session_ts}"
+    record_dir = f"recording_{session_ts}"
     frames_dir = ensure_dir(os.path.join(record_dir, "frames"))
     raw_imu_csv_path = os.path.join(record_dir, "imu_raw.csv")
     print(f"[INFO] Recording into: {record_dir}")
+
+    START_PORT = 6000
+    HB_TIMEOUT = 0.5 #2.0 / UDP_IMU_RATE
+    last_hb = [None]
+    hb_thread = threading.Thread(
+        target=start_heartbeat_listener,
+        args=(SIMULINK_IP, START_PORT, last_hb),
+        daemon=True
+    )
+    hb_thread.start()
+
+    # ----- START SERIAL IMU THREADS -----
+    SERIAL_IMUS = [
+        {"port": args.portA, "baudrate": 115200, "tag": "CentC"}, # cannot have _ in tag
+        {"port": args.portB, "baudrate": 115200, "tag": "HeadR"},
+    ]
+
+    serial_threads = []
+    for cfg_ser in SERIAL_IMUS:
+        t = SerialIMUThread(
+            port       = cfg_ser["port"],
+            baudrate   = cfg_ser["baudrate"],
+            out_dir    = record_dir,
+            tag        = cfg_ser["tag"],
+            max_gap    = 1.0,
+            last_hb    = last_hb,
+            hb_timeout = HB_TIMEOUT
+        )
+        t.start()
+        serial_threads.append(t)
 
     # ----- RealSense setup (single queue) -----
     q    = rs.frame_queue(32)
@@ -108,7 +297,7 @@ def main():
     cfg.enable_stream(rs.stream.gyro,  rs.format.motion_xyz32f, GYRO_RATE_REQ)
     pipe.start(cfg, q)
 
-    # 2) Prepare files
+    # ----- Prepare files -----
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
     csv_file   = open(raw_imu_csv_path, "w", newline='')
     csv_writer = csv.writer(csv_file)
@@ -117,19 +306,12 @@ def main():
         'ax','ay','az','gx','gy','gz'
     ])
 
-    # add counters for video frames
-    video_frame_count = 0
-    first_video_time = None
-    last_video_time  = None
     # ----- Shared + UDP senders -----
     shared     = SharedPacket()
     imu_sender = SimulinkUDPSender("imu", shared, SIMULINK_IP, IMU_PORT, UDP_IMU_RATE)
     cam_sender = SimulinkUDPSender("cam", shared, SIMULINK_IP, CAM_PORT, UDP_CAM_RATE)
     imu_sender.start()
     cam_sender.start()
-
-    # ----- IMU buffering (faster than per-line CSV writes) -----
-    imu_rows = []  # each: (rel_accel_us, rel_color_us, ax, ay, az, gx, gy, gz)
 
     t0_color = None
     t0_accel = None
@@ -144,6 +326,12 @@ def main():
 
     try:
         while True:
+            # heartbeat-timeout check at top of loop
+            hb = last_hb[0]
+            if hb is not None and (time.perf_counter() - hb) > HB_TIMEOUT:
+                print(f"[INFO] no heartbeat for {HB_TIMEOUT:.3f}s → exiting")
+                break
+
             frame = q.wait_for_frame()
             prof  = frame.get_profile()
             Stream_Type = prof.stream_type()
@@ -151,32 +339,32 @@ def main():
             # —— Color frame —— #
             if Stream_Type == rs.stream.color:
                 ts_ms = frame.get_timestamp()  # ms
-                if t0_color is None:
+                if hb is not None and (t0_color is None):
                     t0_color = ts_ms
-                    # enforce accel zero alignment on first color frame:
-                    if t0_accel is None:
-                        t0_accel = None  # force accel branch to set when first accel after color arrives
-                rel_color_us = int((ts_ms - t0_color) * 1000)
+                    print("[INFO] first heartbeat received!")
+                    # t0_accel = None
 
                 raw = frame.get_data()
                 arr = np.frombuffer(raw, dtype=np.uint8)
                 img = arr.reshape((IMG_H, IMG_W, 3))
                 # Save JPEG frame with timestamp in filename
-                fname = os.path.join(frames_dir, f"frame_{rel_color_us}.jpg")
-                cv2.imwrite(fname, img, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+                if t0_color is not None:
+                    rel_color_us = int((ts_ms - t0_color) * 1000)
+                    fname = os.path.join(frames_dir, f"frame_{rel_color_us}.jpg")
+                    cv2.imwrite(fname, img, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
 
-                # Prepare grayscale JPEG for UDP sender (compress once)
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                ok, enc = cv2.imencode(".jpg", gray, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-                if ok:
-                    last_jpeg = enc.tobytes()
-                    last_color_us = rel_color_us
+                    # Prepare grayscale JPEG for UDP sender (compress once)
+                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    ok, enc = cv2.imencode(".jpg", gray, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+                    if ok:
+                        last_jpeg = enc.tobytes()
+                        last_color_us = rel_color_us
 
                 # Simple preview
                 fps_counter += 1
                 now = time.time()
-                if now - last_fps_print >= 1.0:
-                    cv2.putText(img, f"FPS~{fps_counter/(now-last_fps_print):.1f}", (5,25), cv2.FONT_HERSHEY_SIMPLEX, 0.7,(0,255,0),2)
+                cv2.putText(img, f"FPS~{fps_counter/(now-last_fps_print):.1f}", (5,25), cv2.FONT_HERSHEY_SIMPLEX, 0.7,(0,255,0),2)
+                if now - last_fps_print >= 0.5:
                     last_fps_print = now
                     fps_counter = 0
                 cv2.imshow("RGB", img)
@@ -184,32 +372,33 @@ def main():
                     break
                 frame_count += 1
 
-            elif Stream_Type == rs.stream.accel:
+            if Stream_Type == rs.stream.accel:
                 ts_ms = frame.get_timestamp()
-                if last_jpeg is not None and t0_accel is None:
+                # if not last_color_us or not last_jpeg:
+                #     continue  # wait until we have at least one frame
+                if hb is not None and (t0_accel is None) and (t0_color is not None):
                     t0_accel = ts_ms
-                rel_accel_us = int((ts_ms - t0_accel) * 1000)
 
-                if not last_color_us or not last_jpeg:
-                    continue  # wait until we have at least one frame
+                if t0_accel is not None:
+                    rel_accel_us = int((ts_ms - t0_accel) * 1000)
 
-                md = frame.as_motion_frame().get_motion_data()
-                imu = {
-                    "ax": md.x, "ay": md.y, "az": md.z,
-                    **last_gyro
-                }
-                t_enqueue = time.perf_counter()
+                    md = frame.as_motion_frame().get_motion_data()
+                    imu = {
+                        "ax": md.x, "ay": md.y, "az": md.z,
+                        **last_gyro
+                    }
+                    t_enqueue = time.perf_counter()
 
-                # Update shared packet for UDP threads
-                with shared.lock:
-                    shared.data = (rel_accel_us, t_enqueue, imu, last_jpeg, last_color_us)
+                    # Update shared packet for UDP threads
+                    with shared.lock:
+                        shared.data = (rel_accel_us, t_enqueue, imu, last_jpeg, last_color_us)
 
-                # write CSV
-                csv_writer.writerow((
-                    rel_accel_us, last_color_us,
-                    imu["ax"], imu["ay"], imu["az"],
-                    imu["gx"], imu["gy"], imu["gz"]
-                ))
+                    # write CSV
+                    csv_writer.writerow((
+                        rel_accel_us, last_color_us,
+                        imu["ax"], imu["ay"], imu["az"],
+                        imu["gx"], imu["gy"], imu["gz"]
+                    ))
 
             elif Stream_Type == rs.stream.gyro:
                 md = frame.as_motion_frame().get_motion_data()
@@ -221,6 +410,7 @@ def main():
     finally:
         pipe.stop()
         cv2.destroyAllWindows()
+        csv_file.close()
 
         # ----- Auto-run resampler -----
         try:

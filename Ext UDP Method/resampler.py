@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""
+!this code must be at same directory as recording folder
+takes csv files and Jpeg files labeled with timestamp in microseconds 
+to 100Hz fixed timestep file and 100fps video file
+"""
 import argparse, os, re, glob
 import numpy as np
 import pandas as pd
@@ -7,13 +12,10 @@ from tqdm import tqdm
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--path", required=True,
-                    help="Recording directory produced by RS_capture.py")
+    ap.add_argument("--path", required=True, help="Recording directory produced by RS_capture.py")
     ap.add_argument("--target_hz", type=int, default=100)
-    ap.add_argument("--make_video", type=int, default=1,
-                    help="1=create resampled ZOH video, 0=skip")
-    ap.add_argument("--video_rate", type=int, default=100,
-                    help="Output video FPS (ZOH)")
+    ap.add_argument("--make_video", type=int, default=1, help="1=create resampled ZOH video, 0=skip")
+    ap.add_argument("--video_rate", type=int, default=100, help="Output video FPS (ZOH)")
     ap.add_argument("--frame_glob", default="frames/frame_*.jpg")
     return ap.parse_args()
 
@@ -44,6 +46,7 @@ def resample_imu(df, target_hz):
     if imu_us.size == 0:
         raise RuntimeError("Empty IMU data.")
     t_end_us = imu_us[-1]
+    print(t_end_us)
     dt_us    = int(1_000_000 / target_hz)
     uniform_us = np.arange(0, t_end_us + 1, dt_us, dtype=np.int64)
 
@@ -81,22 +84,49 @@ def zoh_video(frames_us, frame_paths, target_rate, out_path):
 def main():
     args = parse_args()
     record_dir = args.path
-    raw_imu_csv = os.path.join(record_dir, "imu_raw.csv")
+     # find all IMU CSV sources: RealSense + any serial‐IMU logs
+    imu_sources = []
+    rs_csv = os.path.join(record_dir, "imu_raw.csv")
+    if os.path.isfile(rs_csv):
+        imu_sources.append(("realsense", rs_csv))
 
-    if not os.path.isfile(raw_imu_csv):
-        raise RuntimeError(f"Cannot find IMU CSV: {raw_imu_csv}")
+    import glob
+    serial_csvs = glob.glob(os.path.join(record_dir, "*_serial_*.csv"))
+    for p in serial_csvs:
+        # derive a tag from filename, e.g. imu_serial_Tag_YYYYMMDD…csv
+        tag = os.path.basename(p).split("_")[0]
+        imu_sources.append((tag, p))
+
+    if not imu_sources:
+        raise RuntimeError(f"No IMU CSV files found in {record_dir}")
 
     print("[INFO] Loading frames...")
     frames_us, frame_paths = load_frames(record_dir, args.frame_glob)
 
-    print("[INFO] Loading IMU CSV...")
-    imu_df = load_imu_csv(raw_imu_csv)
+    # process each IMU source
+    for tag, path in imu_sources:
+        print(f"[INFO] Loading IMU CSV ({tag}): {path}")
+        df = pd.read_csv(path)
 
-    print("[INFO] Resampling IMU to uniform grid...")
-    res_df = resample_imu(imu_df, args.target_hz)
-    imu_out_csv = os.path.join(record_dir, f"imu_resampled_{args.target_hz}Hz.csv")
-    res_df.to_csv(imu_out_csv, index=False)
-    print(f"[INFO] IMU resampled CSV: {imu_out_csv} ({len(res_df)} rows)")
+        # normalize columns
+        if "t_accel_us" not in df.columns and "t_rel" in df.columns:
+            df = df.rename(columns={"t_rel":"t_accel_us"})
+            df["t_accel_us"] = (df["t_accel_us"].to_numpy()*1e6).round().astype(np.int64)
+        # now should have a numeric t_accel_us and ax…gz
+
+        print(f"[INFO] Resampling {tag} IMU to {args.target_hz}Hz...")
+        res_df = resample_imu(df, args.target_hz)
+        out_csv = os.path.join(record_dir, f"{tag}_resampled_{args.target_hz}Hz.csv")
+        res_df.to_csv(out_csv, index=False)
+        print(f"[INFO] → {tag} resampled CSV: {out_csv} ({len(res_df)} rows)")
+
+    # final report
+    video_span = frames_us[-1] / 1e6
+    imu_spans  = ", ".join(
+        f"{tag}={pd.read_csv(os.path.join(record_dir, f'{tag}_resampled_{args.target_hz}Hz.csv'))['t_sec'].iloc[-1]:.3f}s"
+        for tag, _ in imu_sources
+    )
+    print(f"[REPORT] Video span: {video_span:.3f}s | IMU spans: {imu_spans}")
 
     if args.make_video:
         vid_out = os.path.join(record_dir, f"video_zoh_{args.video_rate}Hz.avi")
@@ -105,8 +135,7 @@ def main():
         print(f"[INFO] ZOH video written: {vid_out}")
 
     # Simple report
-    print(f"[REPORT] Raw video span: {frames_us[-1]/1e6:.3f}s | "
-          f"Resampled IMU span: {res_df['t_sec'].iloc[-1]:.3f}s")
+    print(f"[REPORT] Raw video span: {frames_us[-1]/1e6:.3f}s | "f"Resampled IMU span: {res_df['t_sec'].iloc[-1]:.3f}s")
 
 if __name__ == "__main__":
     main()
