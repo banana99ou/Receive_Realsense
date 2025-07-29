@@ -76,9 +76,9 @@ class SerialIMUThread(threading.Thread):
             while True:
                 # check heartbeat timeout
                 hb = self.last_hb[0]
-                if hb is not None and (time.perf_counter() - hb) > HB_TIMEOUT:
-                    print(f"[SERIAL {self.tag}] no heartbeat for {HB_TIMEOUT:.3f}s → exiting")
-                    break
+                # if hb is not None and (time.perf_counter() - hb) > HB_TIMEOUT:
+                #     print(f"[SERIAL {self.tag}] no heartbeat for {HB_TIMEOUT:.3f}s → exiting")
+                #     break
 
                 # read line
                 try:
@@ -303,15 +303,16 @@ def main():
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow([
         't_accel_us','t_color_us',
-        'ax','ay','az','gx','gy','gz'
+        'ax','ay','az','gx','gy','gz',
+        'wall_clock'
     ])
 
     # ----- Shared + UDP senders -----
     shared     = SharedPacket()
-    imu_sender = SimulinkUDPSender("imu", shared, SIMULINK_IP, IMU_PORT, UDP_IMU_RATE)
-    cam_sender = SimulinkUDPSender("cam", shared, SIMULINK_IP, CAM_PORT, UDP_CAM_RATE)
-    imu_sender.start()
-    cam_sender.start()
+    # imu_sender = SimulinkUDPSender("imu", shared, SIMULINK_IP, IMU_PORT, UDP_IMU_RATE)
+    # cam_sender = SimulinkUDPSender("cam", shared, SIMULINK_IP, CAM_PORT, UDP_CAM_RATE)
+    # imu_sender.start()
+    # cam_sender.start()
 
     t0_color = None
     t0_accel = None
@@ -328,9 +329,9 @@ def main():
         while True:
             # heartbeat-timeout check at top of loop
             hb = last_hb[0]
-            if hb is not None and (time.perf_counter() - hb) > HB_TIMEOUT:
-                print(f"[INFO] no heartbeat for {HB_TIMEOUT:.3f}s → exiting")
-                break
+            # if hb is not None and (time.perf_counter() - hb) > HB_TIMEOUT:
+            #     print(f"[INFO] no heartbeat for {HB_TIMEOUT:.3f}s → exiting")
+            #     break
 
             frame = q.wait_for_frame()
             prof  = frame.get_profile()
@@ -393,11 +394,14 @@ def main():
                     with shared.lock:
                         shared.data = (rel_accel_us, t_enqueue, imu, last_jpeg, last_color_us)
 
-                    # write CSV
+                    wallclock = datetime.datetime.now().strftime("%H%M%S_%f")
+
+                    # write CSV.
                     csv_writer.writerow((
                         rel_accel_us, last_color_us,
                         imu["ax"], imu["ay"], imu["az"], 
-                        imu["gx"], imu["gy"], imu["gz"]
+                        imu["gx"], imu["gy"], imu["gz"],
+                        wallclock
                     ))
 
             elif Stream_Type == rs.stream.gyro:
@@ -413,16 +417,16 @@ def main():
         csv_file.close()
 
         # ----- Auto-run resampler -----
-        try:
-            print("[INFO] Running resampler...")
-            subprocess.run([sys.executable, "resampler.py",
-                            "--path", record_dir,
-                            "--target_hz", "100",
-                            "--make_video", "1",
-                            "--video_rate", "100"],
-                           check=True)
-        except Exception as e:
-            print(f"[WARN] Resampler failed: {e}")
+        # try:
+        #     print("[INFO] Running resampler...")
+        #     subprocess.run([sys.executable, "resampler.py",
+        #                     "--path", record_dir,
+        #                     "--target_hz", "100",
+        #                     "--make_video", "1",
+        #                     "--video_rate", "100"],
+        #                    check=True)
+        # except Exception as e:
+        #     print(f"[WARN] Resampler failed: {e}")
 
         print("[INFO] Done.")
 
