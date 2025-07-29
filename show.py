@@ -14,8 +14,8 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 # ── CONFIGURE HERE ───────────────────────────────────────────────────────────
-FOLDER    = Path("./recording_20250726_010328_238")
-ACC_COLS  = ["ax", "ay", "az"]   # which accelerometer channels to draw
+FOLDER    = Path("./recording_20250729_012241_298")
+ACC_COLS  = ["ax", "ay", "az", "gx", "gy", "gz"]   # which accelerometer channels to draw
 FIGSIZE   = (12, 8)
 # ─────────────────────────────────────────────────────────────────────────────
 

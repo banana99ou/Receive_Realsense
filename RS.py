@@ -384,7 +384,7 @@ def main():
 
                     md = frame.as_motion_frame().get_motion_data()
                     imu = {
-                        "ax": md.x, "ay": md.y, "az": md.z,
+                        "ax": -md.z, "ay": md.x, "az": md.y,
                         **last_gyro
                     }
                     t_enqueue = time.perf_counter()
@@ -396,13 +396,13 @@ def main():
                     # write CSV
                     csv_writer.writerow((
                         rel_accel_us, last_color_us,
-                        imu["ax"], imu["ay"], imu["az"],
+                        imu["ax"], imu["ay"], imu["az"], 
                         imu["gx"], imu["gy"], imu["gz"]
                     ))
 
             elif Stream_Type == rs.stream.gyro:
                 md = frame.as_motion_frame().get_motion_data()
-                last_gyro = {"gx": md.x, "gy": md.y, "gz": md.z}
+                last_gyro = {"gx": md.z, "gy": -md.x, "gz": -md.y}
 
     except KeyboardInterrupt:
         pass
