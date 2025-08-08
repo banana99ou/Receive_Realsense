@@ -55,7 +55,7 @@ def extract_time_series(df: pd.DataFrame) -> pd.Series:
 
 def main() -> None:
     args = argparse.ArgumentParser()
-    args.add_argument("--path")
+    args.add_argument("--path", "-p", required=True)
     args= args.parse_args()
 
     FOLDER = Path(args.path)
