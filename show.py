@@ -12,9 +12,10 @@ to toggle each run on/off.  Understands these layouts:
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
+import argparse
 
 # ── CONFIGURE HERE ───────────────────────────────────────────────────────────
-FOLDER    = Path("./recording_20250729_012241_298")
+FOLDER    = Path("./Experiment data/0805/recording_20250805_104117_893")
 ACC_COLS  = ["ax", "ay", "az", "gx", "gy", "gz"]   # which accelerometer channels to draw
 FIGSIZE   = (12, 8)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -53,6 +54,12 @@ def extract_time_series(df: pd.DataFrame) -> pd.Series:
 
 
 def main() -> None:
+    args = argparse.ArgumentParser()
+    args.add_argument("--path")
+    args= args.parse_args()
+
+    FOLDER = Path(args.path)
+
     csv_files = sorted(FOLDER.glob("*.csv"))
     if not csv_files:
         raise FileNotFoundError(f"No CSV files found in {FOLDER}")
