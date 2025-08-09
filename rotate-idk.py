@@ -2,22 +2,23 @@
 """
 postprocess_imu.py
 
-1. Reads raw IMU CSV.
+1. Reads raw IMU CSV (auto-detected in --path).
 2. Bias‐corrects accelerations (removes the pre‐calibrated resting vector).
 3. Rotates IMU→Car frame.
 4. (Optional) fine calibrates so gravity aligns to (0,0,-1).
 5. Converts units to m/s² and rad/s.
-6. Writes out the result.
+6. Writes out the result with “_Rot” suffix.
 """
 
-import pandas as pd
+import os
+import sys
+import glob
+import argparse
+import subprocess
 import numpy as np
+import pandas as pd
 
-# —————— Configuration ——————
-INPUT_CSV   = 'Experiment data/0805/recording_20250805_104117_893/HeadR_serial_20250804_143716_COM36.csv'         # your input file
-OUTPUT_CSV  = 'Experiment data/0805/recording_20250805_104117_893/HeadR_serial_20250804_143716_COM36_Rot.csv'   # where to save
-
-# Number of initial samples to average for bias removal
+# Number of initial samples to average for bias removal (unused in this fixed-bias example)
 BIAS_SAMPLES = 10  
 
 
@@ -29,15 +30,13 @@ def compute_calib_rotation(v0, v_target=(0, 0, -1), eps=1e-6):
     v0_u = v0 / np.linalg.norm(v0)
     vt_u = np.array(v_target) / np.linalg.norm(v_target)
 
-    # axis = v0 × vt
     axis = np.cross(v0_u, vt_u)
     axis_norm = np.linalg.norm(axis)
     if axis_norm < eps:
         return np.eye(3)
 
     axis /= axis_norm
-    phi   = np.arccos(np.clip(np.dot(v0_u, vt_u), -1.0, 1.0))
-
+    phi = np.arccos(np.clip(np.dot(v0_u, vt_u), -1.0, 1.0))
     ux, uy, uz = axis
     K = np.array([
         [ 0,  -uz,  uy],
@@ -53,10 +52,28 @@ def compute_calib_rotation(v0, v_target=(0, 0, -1), eps=1e-6):
 
 
 def main():
-    # 1. Load
-    df = pd.read_csv(INPUT_CSV)
+    parser = argparse.ArgumentParser(description="Post-process IMU CSV in a given folder (HeadR_serial_*.csv → _Rot.csv)")
+    parser.add_argument("--path", "-p", required=True)
+    parser.add_argument("--show", "-s", action='store_true')
+    args = parser.parse_args()
+    folder = args.path
 
-    # 2. Bias removal (avg of first N samples)
+    # find the first matching CSV
+    pattern = os.path.join(folder, "HeadR_serial_*.csv")
+    files = sorted(glob.glob(pattern))
+    if not files:
+        raise SystemExit(f"No matching CSV files found in {folder!r}")
+    input_csv = files[0]
+
+    # build output filename
+    base = os.path.basename(input_csv)
+    name, ext = os.path.splitext(base)
+    output_csv = os.path.join(folder, f"{name}_Rot{ext}")
+
+    # 1. Load
+    df = pd.read_csv(input_csv)
+
+    # 2. Bias removal (fixed bias here; to use dynamic, replace with df[['ax','ay','az']].iloc[:BIAS_SAMPLES].mean())
     bias = np.array([0.0, 10.0, -10.0])
     acc_raw = df[['ax','ay','az']].to_numpy()
     acc_bc  = acc_raw - bias
@@ -87,10 +104,12 @@ def main():
     # 6. Save
     df[['ax','ay','az']] = acc_car
     df[['gx','gy','gz']] = gyro_car
-    df.to_csv(OUTPUT_CSV, index=False)
+    df.to_csv(output_csv, index=False)
 
-    print(f"Done! Processed data written to: {OUTPUT_CSV}")
-
+    print(f"Done! Processed data written to: {output_csv}")
+    if args.show:
+        print(f"plotting")
+        subprocess.run([sys.executable, "show.py", "-p", folder])
 
 if __name__ == "__main__":
     main()
