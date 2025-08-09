@@ -91,14 +91,34 @@ def main():
         imu_sources.append(("realsense", rs_csv))
 
     import glob
-    serial_csvs = glob.glob(os.path.join(record_dir, "*_serial_*.csv"))
-    for p in serial_csvs:
-        # derive a tag from filename, e.g. imu_serial_Tag_YYYYMMDD…csv
+    # gather all serial CSVs (raw + rotated)
+    all_serial = glob.glob(os.path.join(record_dir, "*_serial_*.csv"))
+
+    # separate rotated vs raw
+    rot_files = [p for p in all_serial if p.endswith("_Rot.csv")]
+    raw_files = [p for p in all_serial if not p.endswith("_Rot.csv")]
+
+    # find which base‐names have a rotated version
+    rot_bases = {
+        os.path.splitext(os.path.basename(p))[0].rsplit("_Rot", 1)[0]
+        for p in rot_files
+    }
+
+    # prefer rotated; only include raw if no Rot exists
+    chosen = []
+    chosen.extend(rot_files)
+    for p in raw_files:
+        base = os.path.splitext(os.path.basename(p))[0]
+        if base not in rot_bases:
+            chosen.append(p)
+
+    # finally, build imu_sources from chosen files
+    for p in chosen:
         tag = os.path.basename(p).split("_")[0]
         imu_sources.append((tag, p))
 
-    if not imu_sources:
-        raise RuntimeError(f"No IMU CSV files found in {record_dir}")
+    # if not imu_sources:
+    #     raise RuntimeError(f"No IMU CSV files found in {record_dir}")
 
     print("[INFO] Loading frames...")
     frames_us, frame_paths = load_frames(record_dir, args.frame_glob)
