@@ -11,13 +11,16 @@ MAX_GAP   = 1.0   # seconds to warn on no data
 def main():
     parser = argparse.ArgumentParser(description="Stand Alone IMU reciever")
     parser.add_argument("--port", default="/dev/cu.usbserial-0001")
-    parser.add_argument("--baudrate", default="1000000")
+    parser.add_argument("--baudrate", default="115200")
     parser.add_argument("--verbose", action="store_true", help="Log debug messages to console")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="[%(levelname)s] %(message)s")
 
     ser = serial.Serial(args.port, args.baudrate, timeout=0.1)
+    time.sleep(0.3)
+    ser.reset_input_buffer()
+
     now = datetime.now()
     port_tag = os.path.basename(args.port).replace(":", "_").replace("/", "_")
     fname = f"{datetime.now():%Y%m%d_%H%M%S}_{now.microsecond//1000:03d}_{port_tag}.csv"
